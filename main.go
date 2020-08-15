@@ -45,6 +45,7 @@ func main() {
 	if RunWebserver {
 		r := gin.Default()
 		// TODO: List endpoints if base URL is called
+		// TODO: Allow to specify listening port as second command line argument
 
 		// REST endpoint for statistic values
 		r.GET("/stats", func(c *gin.Context) {
