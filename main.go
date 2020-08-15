@@ -23,24 +23,16 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-resty/resty/v2"
 	"log"
+	"os"
 	"regexp"
 	"strings"
 )
 
 // server configuration
-const RunAddress = ":5432"                 //listen and serve on 0.0.0.0:5432 (for windows "localhost:8080")
-const ISGAddress = "http://192.168.1.126/" //TODO: add as command line parameter
-const ISGStartAddress = ISGAddress + "?s=0"
-const ISGAnlagenAddress = ISGAddress + "?s=1,0"
-const ISGWaermepumpeAddress = ISGAddress + "?s=1,2"
-const ISGHeizenAddress = ISGAddress + "?s=4,0"
-const ISGWarmwasserAddress = ISGAddress + "?s=4,1"
-const ISGKuehlenAddress = ISGAddress + "?s=4,2"
-const ISGSaveAdress = ISGAddress + "save.php"
-const RunWebserver = false
+const RunWebserver = true
+const RunAddress = ":5432" //listen and serve on 0.0.0.0:5432 (for windows "localhost:8080")
 
 // constants for ISG configuration values used in setValue() function
-const ValueBetriebsart = "val1"                  // <mode-nummer>
 const ValueInnenraumTemperatur = "val16"         // i.i (z.B. 24.1)
 const ValueWarmwasser = "val22"                  // i.i (z.B. 50.0)
 const ValueHeizenKomfortTemperatur = "val16"     // i.i (z.B. 20.0)
@@ -50,23 +42,34 @@ const ValueWarmwasserKomfortTemperatur = "val22" // i.i (z.B. 50.0)
 const ValueWarmwasserEcoTemperatur = "val23"     // i.i (z.B. 50.0)
 
 func main() {
-
-	//TODO: Define REST API based on HTTP router
 	if RunWebserver {
 		r := gin.Default()
+		// TODO: List endpoints if base URL is called
+
+		// REST endpoint for statistic values
 		r.GET("/stats", func(c *gin.Context) {
-			c.JSON(200, gin.H{
-				"message": "Hallo Du!",
-			})
+			// collect values
+			var output map[string]string
+			output = make(map[string]string)
+			extractStatistics(getISGbaseURL()+"?s=1,0", output) // Anlage
+			extractStatistics(getISGbaseURL()+"?s=1,2", output) // Wärmepumpe
+			getValues(output)
+			c.JSON(200, output)
 		})
+
+		// REST endpoint for config value modification
+		r.GET("/value/:name", func(c *gin.Context) {
+			//TODO: add error handling and more expressive value refs
+			//TODO: return current config value of no new parameter is provided
+			name := c.Param("name")
+			newval := c.Query("new")
+			setValue(name, newval)
+			c.JSON(200, "OK")
+		})
+
 		r.Run(RunAddress)
 		fmt.Println("Stiebel Eltron ISG API Server started.")
 	}
-	//extractStatistics(ISGAnlagenAddress)
-	//extractStatistics(ISGWaermepumpeAddress)
-	getValues()
-	//setValue(ValueHeizenKomfortTemperatur, "24.0")
-
 }
 
 //
@@ -78,7 +81,7 @@ func main() {
 //    <td class="value">21,8°C</td>
 //</tr>
 //
-func extractStatistics(endpoint string) {
+func extractStatistics(endpoint string, output map[string]string) {
 
 	body := fetchContent(endpoint)
 	//extract keys and values with regex magic
@@ -88,7 +91,7 @@ func extractStatistics(endpoint string) {
 
 	//print keys and values on console
 	for _, match := range matches {
-		fmt.Printf("%s -> %s \n", match[1], match[2])
+		output[match[1]] = match[2]
 	}
 
 }
@@ -98,7 +101,7 @@ func extractStatistics(endpoint string) {
 // Content-Type: application/x-www-form-urlencoded
 // save one config value: data = {"name":"val16","value":"24,0"}
 // save multiple config values: data = [{"name":"val16","value":"24,0"},{"name":"val17","value":"24,0"},{"name":"val25","value":"0.70"}]
-func setValue(key string, value string) {
+func setValue(key string, value string) string {
 
 	//post new value
 	client := resty.New()
@@ -108,12 +111,12 @@ func setValue(key string, value string) {
 		SetFormData(map[string]string{
 			"data": body,
 		}).
-		Post(ISGSaveAdress)
+		Post(getISGbaseURL() + "save.php")
 	if err != nil {
 		log.Fatal(err)
 	}
 	result := resp.String()
-	fmt.Println("Value saved with message: " + result)
+	return result
 
 }
 
@@ -124,41 +127,42 @@ func setValue(key string, value string) {
 // Heizen: http://192.168.1.126/?s=4,0
 // Warmwasser: http://192.168.1.126/?s=4,1
 // jsvalues['16']['id']='val16'; jsvalues['16']['val']='24,0';
-func getValues() {
+func getValues(output map[string]string) {
 
 	// Kühlen status
-	kuehlenBody := fetchContent(ISGKuehlenAddress)
+	kuehlenBody := fetchContent(getISGbaseURL() + "?s=4,2") //Kühlen
 	regexKuehlen := "<input id=\"aval456\" value=\"(?P<Value>.*)\" readonly=\"readonly\""
 	m1 := regexp.MustCompile(regexKuehlen)
 	kuehlenStatus := m1.FindStringSubmatch(kuehlenBody)[1]
-	fmt.Println("Kühlen: " + kuehlenStatus)
+	output["KUEHLEN"] = kuehlenStatus
 
 	// Heizen status
-	heizenBody := fetchContent(ISGHeizenAddress)
+	heizenBody := fetchContent(getISGbaseURL() + "?s=4,0") //Heizen
 	heizenKomfortTemperatur := extractJSvalue(heizenBody, ValueHeizenKomfortTemperatur)
 	heizenEcoTemperatur := extractJSvalue(heizenBody, ValueHeizenEcoTemperatur)
 	heizenSteigungHeizkurve := extractJSvalue(heizenBody, ValueHeizenSteigungHeizkurve)
-	fmt.Println("Heizen Komforttemperatur: " + heizenKomfortTemperatur)
-	fmt.Println("Heizen Eco-Temperatur: " + heizenEcoTemperatur)
-	fmt.Println("Heizen Steigung Heizkurve: " + heizenSteigungHeizkurve)
+	output["HEIZEN KOMFORTTEMPERATUR"] = heizenKomfortTemperatur
+	output["HEIZEN ECOTEMPERATUR"] = heizenEcoTemperatur
+	output["HEIZUNG STEIGUNG-HEIZKURVE"] = heizenSteigungHeizkurve
 
 	// Warmwasser status
-	wwBody := fetchContent(ISGWarmwasserAddress)
+	wwBody := fetchContent(getISGbaseURL() + "?s=4,1") //Warmwasser
 	wwKomfortTemperatur := extractJSvalue(wwBody, ValueWarmwasserKomfortTemperatur)
 	wwEcoTemperatur := extractJSvalue(wwBody, ValueWarmwasserEcoTemperatur)
-	fmt.Println("Warmwasser Komforttemperatur: " + wwKomfortTemperatur)
-	fmt.Println("Warmwasser Eco-Temperatur: " + wwEcoTemperatur)
+	output["WARMWASSER KOMFORTTEMPERATUR"] = wwKomfortTemperatur
+	output["WARMWASSER ECOTEMPERATUR"] = wwEcoTemperatur
 
 	// Overall status
-	startBody := fetchContent(ISGStartAddress)
+	startBody := fetchContent(getISGbaseURL() + "?s=0") //Start
 	innenraumTemperatur := extractJSvalue2(startBody, ValueInnenraumTemperatur)
 	warmwasserTemperatur := extractJSvalue2(startBody, ValueWarmwasser)
-	fmt.Println("Temperatur Innenraum: " + innenraumTemperatur)
-	fmt.Println("Temperatur Warmwasser: " + warmwasserTemperatur)
 	regexBetriebsart := "<input class=\"value curpoi\" readonly=\"readonly\" id=\"aval1\" name=\"aval1\" type=\"text\" value=\"(?P<Value>.*)\" style=\"width:255px\""
 	m2 := regexp.MustCompile(regexBetriebsart)
 	betriebsart := m2.FindStringSubmatch(startBody)[1]
-	fmt.Println("Betriebsart: " + betriebsart)
+	output["TEMPERATUR INNENRAUM"] = innenraumTemperatur
+	output["TEMPERATUR WARMWASSER"] = warmwasserTemperatur
+	output["BETRIEBSART"] = betriebsart
+
 }
 
 // Fetch website content via GET request.
@@ -187,4 +191,15 @@ func extractJSvalue2(body string, key string) string {
 	regex := fmt.Sprintf("jsobj\\['id'\\]='%s';\\njsobj\\['val'\\]='(?P<Value>.*)';", key+"info")
 	m := regexp.MustCompile(regex)
 	return m.FindStringSubmatch(body)[1]
+}
+
+// Returns the ISG base URL as specified with command-line argument 1
+func getISGbaseURL() string {
+	if len(os.Args) > 1 {
+		return fmt.Sprintf("http://%s/", os.Args[1])
+	} else {
+		fmt.Println("ERROR: Please provide ISG IP as first command-line argument")
+		os.Exit(-1)
+	}
+	return ""
 }
